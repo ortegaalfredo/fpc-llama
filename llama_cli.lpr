@@ -25,7 +25,8 @@ end;
 var
   Ctx     : Pllama_context;
   Model   : Pllama_model;
-  Params  : Tllama_context_params;
+  CtxParams  : Tllama_context_params;
+  MParams: Tllama_model_params;
   S,
   ModelFName: String;
   TokenStr: String;
@@ -90,25 +91,29 @@ var
   SSTokens: TTokenList;
   logits: Psingle;
   token_id: Tllama_token;
-  max_context_size,max_tokens_list_size: Integer;
+  max_context_size: Integer;
 
 begin
   ParseParameters;
   SetExceptionMask(GetExceptionMask + [exOverflow,exZeroDivide,exInvalidOp]); // God dammit, llama.cpp
   llama_backend_init(False);
-  Params := llama_context_default_params;
+  CtxParams := llama_context_default_params;
+  CtxParams.n_threads:=N_THREADS;
+  CtxParams.n_threads_batch:=1;
+  MParams := llama_model_default_params;
+  MParams.n_gpu_layers:=0;
   SSTokens := TTokenList.Create;
   EmbdInp := TTokenList.Create;
   ModelFName := ModelFName;
 
   // Load model
-  Model := llama_load_model_from_file(PChar(ModelFName), Params);
+  Model := llama_load_model_from_file(PChar(ModelFName), MParams);
   if Model = nil then
     raise Exception.Create('Failed to load model');
 
   if IsInteractive then
     Writeln(#10'Interactive mode is ON'#10);
-   Ctx:=llama_new_context_with_model(Model,Params);
+   Ctx:=llama_new_context_with_model(Model,CtxParams);
 
   repeat
     if not IsInteractive then
@@ -123,24 +128,23 @@ begin
     end;
 
     max_context_size     := llama_n_ctx(ctx);
-    max_tokens_list_size := max_context_size - 4;
     n_gen := Min(1024, max_context_size);
 
     S := Prompt;
 
     // tokenize the prompt
     EmbdInp.Count := Length(Prompt) + 1;
-    C := llama_tokenize(Ctx, PChar(Prompt), Length(Prompt), EmbdInp.Data, EmbdInp.Count, False);
+    C := llama_tokenize(Model, PChar(Prompt), Length(Prompt), EmbdInp.Data, EmbdInp.Count, False, False);
     candidates:=[];
 
     // main loop
     while llama_get_kv_cache_token_count(ctx) < n_gen do
         begin
-        llama_eval(Ctx, EmbdInp.Data, C, llama_get_kv_cache_token_count(ctx), N_THREADS);
+        llama_eval(Ctx, EmbdInp.Data, C, llama_get_kv_cache_token_count(ctx));
         EmbdInp.Clear;
 
         // sample the next token
-        n_vocab := llama_n_vocab(ctx);
+        n_vocab := llama_n_vocab(Model);
         SetLength(candidates, n_vocab);
         logits := llama_get_logits(ctx);
 
@@ -165,16 +169,16 @@ begin
         llama_sample_temperature(ctx, @candidates_p, temp);
         token_id:=llama_sample_token(ctx, @candidates_p);
         // Alternative greedy sampling
-  //      token_id:=llama_sample_token_greedy(ctx, @candidates_p);
-        if token_id = llama_token_eos(ctx) then
+  //      token_id:=llama_sample_token_greedy(Model, @candidates_p);
+        if token_id = llama_token_eos(Model) then
             begin
               Write(' <EOS>');
               break;
             end
             else begin
-                  TokenStr:=llama_token_get_text(Ctx, token_id);
+                  TokenStr:=llama_token_get_text(Model, token_id);
                   TokenStr:=StringReplace(TokenStr,'▁',' ',[rfReplaceAll]);
-                  if token_id = llama_token_nl(ctx) then
+                  if token_id = llama_token_nl(Model) then
                        Write(#10)
                   else Write(TokenStr);
                   EmbdInp.Add(token_id);
